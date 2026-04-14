@@ -2443,7 +2443,7 @@ int main(int argc, char **argv) {
         }
 
         if (test_is_selected("set")) {
-            len = valkeyFormatCommand(&cmd, "SET key%s:__rand_int__ %s", tag, data);
+            len = valkeyFormatCommand(&cmd, "SET key%s:__rand_int__ %s EX 1000000", tag, data);
             benchmark("SET", cmd, len);
             free(cmd);
         }

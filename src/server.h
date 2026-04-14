@@ -849,7 +849,6 @@ char *getObjectTypeName(robj *);
         _var.val_ptr = _ptr;                 \
     } while (0)
 
-struct evictionPoolEntry; /* Defined in evict.c */
 
 typedef struct payloadHeader payloadHeader; /* Defined in networking.c */
 
@@ -907,6 +906,7 @@ typedef struct serverDb {
                                            * This is a subset of blocking_keys*/
     dict *ready_keys;                     /* Blocked keys that received a PUSH */
     dict *watched_keys;                   /* WATCHED keys for MULTI/EXEC CAS */
+    hashtable *keys_to_ext_storage;       /* keys in flight to external storage */
     int id;                               /* Database ID */
     struct {
         long long avg_ttl;    /* Average TTL, just for stats */
@@ -3876,6 +3876,17 @@ void evictionPoolAlloc(void);
 #define EVICT_OK 0
 #define EVICT_RUNNING 1
 #define EVICT_FAIL 2
+#define EVPOOL_SIZE 16
+#define EVPOOL_CACHED_SDS_SIZE 255
+
+typedef struct evictionPoolEntry {
+    unsigned long long idle; /* Object idle time (inverse frequency for LFU) */
+    sds key;                 /* Key name. */
+    sds cached;              /* Cached SDS object for key name. */
+    int dbid;                /* Key DB number. */
+    int slot;                /* Slot. */
+} evictionPoolEntry;
+
 int performEvictions(void);
 void startEvictionTimeProc(void);
 

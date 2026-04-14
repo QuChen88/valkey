@@ -482,6 +482,7 @@ ENGINE_SERVER_OBJ = \
     eval.o \
     evict.o \
     expire.o \
+    ext_storage.o \
     fifo.o \
     functions.o \
     geo.o \

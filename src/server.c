@@ -32,6 +32,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "server.h"
+#include "ext_storage.h"
 #include "connection.h"
 #include "monotonic.h"
 #include "cluster.h"
@@ -2016,6 +2017,10 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     /* Disconnect some clients if they are consuming too much memory. */
     evictClients();
 
+    // Process all completed tiered storage IO requests and spill a batch of
+    // old items to disk if we are over the memory threshold for spilling items
+    processCompletedStorageRequestsAndSpillOldItems();
+
     /* Record cron time in beforeSleep. */
     monotime duration_after_write = getMonotonicUs() - cron_start_time_after_write;
 
@@ -2916,6 +2921,7 @@ serverDb *createDatabase(int id) {
     db->blocking_keys_unblock_on_nokey = dictCreate(&objectKeyPointerValueDictType);
     db->ready_keys = dictCreate(&objectKeyPointerValueDictType);
     db->watched_keys = dictCreate(&keylistDictType);
+    db->keys_to_ext_storage = hashtableCreate(&setHashtableType);
     db->id = id;
     resetDbExpiryState(db);
     return db;
@@ -3144,6 +3150,8 @@ void initServer(void) {
 
     /* Initialize the EVAL scripting component. */
     evalInit();
+
+    extStorage_init();
 
     applyWatchdogPeriod();
 
@@ -4271,6 +4279,15 @@ void unprepareCommand(client *c) {
 int processCommand(client *c) {
     serverAssert(!c->flag.blocked && !c->flag.unblocked);
 
+    // For data tiering, we first try to process the completed storage
+    // requests and unblock previous clients. This needs to be done prior
+    // to starting any processing for the current client because we don't
+    // want to further delay the previously blocked clients as they have
+    // strictly higher priority over newly incoming clients.
+    // In addition, we want to spill old items to disk if the memory usage
+    // is above the spill to disk memory threshold.
+    // processCompletedStorageRequestsAndSpillOldItems();
+
     if (!scriptIsTimedout()) {
         /* Both EXEC and scripts call call() directly so there should be
          * no way in_exec or scriptIsRunning() is 1.
@@ -4615,6 +4632,9 @@ int processCommand(client *c) {
         queueMultiCommand(c, cmd_flags);
         addReply(c, shared.queued);
     } else {
+        if (preCommandExec(c) == CMD_FILTER_REJECT) {
+            return C_OK;
+        }
         int flags = CMD_CALL_FULL;
         call(c, flags);
         if (listLength(server.ready_keys) && !isInsideYieldingLongCommand()) handleClientsBlockedOnKeys();
