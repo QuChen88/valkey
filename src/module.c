@@ -662,6 +662,127 @@ void *VM_PoolAlloc(ValkeyModuleCtx *ctx, size_t bytes) {
     return retval;
 }
 
+// Data tiering module subscription APIs
+typedef struct ValkeyModuleExternalStorageSubscriber {
+    ValkeyModule *module;
+    ValkeyModuleExternalStorageRequestCallback request_callback;
+    ValkeyModuleExternalStorageResponseCallback response_callback;
+    void *priv_data;
+} ValkeyModuleExternalStorageSubscriber;
+
+static list *moduleExternalStorageSubscribers = NULL;
+
+int VM_SubscribeToExternalStorage(ValkeyModuleCtx *ctx, ValkeyModuleExternalStorageRequestCallback reqCallback,
+                                  ValkeyModuleExternalStorageResponseCallback resCallback) {
+    if (reqCallback == NULL || resCallback == NULL) return VALKEYMODULE_ERR;
+    ValkeyModuleExternalStorageSubscriber *sub = zmalloc(sizeof(*sub));
+    sub->module = ctx->module;
+    sub->request_callback = reqCallback;
+    sub->response_callback = resCallback;
+    sub->priv_data = NULL;
+    if (moduleExternalStorageSubscribers == NULL) {
+        moduleExternalStorageSubscribers = listCreate();
+    }
+    listAddNodeTail(moduleExternalStorageSubscribers, sub);
+    return VALKEYMODULE_OK;
+}
+
+int VM_UnsubscribeFromExternalStorage(ValkeyModuleCtx *ctx) {
+    if (moduleExternalStorageSubscribers == NULL) return VALKEYMODULE_OK;
+    listIter li;
+    listNode *ln;
+    listRewind(moduleExternalStorageSubscribers, &li);
+    while ((ln = listNext(&li))) {
+        ValkeyModuleExternalStorageSubscriber *sub = ln->value;
+        if (sub->module == ctx->module) {
+            listDelNode(moduleExternalStorageSubscribers, ln);
+            zfree(sub);
+            break;
+        }
+    }
+    return VALKEYMODULE_OK;
+}
+
+// De-serialize the value object from its DUMP payload.
+void* VM_DeserializeDumpPayload(ValkeyModuleCtx *ctx, char *value, size_t length) {
+    UNUSED(ctx);
+    rio payload;
+    int type;
+    robj *value_obj = NULL;
+    sds value_sds = sdsnewlen(value, length);
+    rioInitWithBuffer(&payload, value_sds);
+
+    // Read object type
+    if ((type = rdbLoadType(&payload)) == -1) {
+        serverLog(LL_WARNING, "Error loading object type from storage Engine");
+        serverAssert(0);
+    }
+
+    // Read object value.
+    // TODO: This rdbLoadObject() method is not thread safe due to accessing the server
+    // config values, so we need to mutex guard it against server config changes.
+    if ((value_obj = rdbLoadObject(type, &payload, NULL, -1, NULL, RDBFLAGS_NONE, 0)) == NULL) {
+        serverLog(LL_WARNING, "Error loading object from storage Engine");
+        serverAssert(0);
+    }
+    sdsfree(value_sds);
+    return (void *)value_obj;
+}
+
+// Fire an external storage event to the registered external storage modules.
+// Returns 0 if there are no external storage modules and this is a no-op, returns 1 otherwise.
+int moduleFireExternalStorageEvent(ValkeyModuleExternalStorageMsg *msg) {
+    if (!moduleHasExternalStorageSubscribers()) {
+        return 0;
+    }
+    listIter li;
+    listNode *ln;
+    listRewind(moduleExternalStorageSubscribers, &li);
+    while ((ln = listNext(&li))) {
+        ValkeyModuleExternalStorageSubscriber *sub = ln->value;
+        ValkeyModuleCtx ctx;
+        moduleCreateContext(&ctx, sub->module, VALKEYMODULE_CTX_TEMP_CLIENT);
+        ctx.client->db = server.db[msg->db_id];
+        sub->request_callback(&ctx, msg->msg_type, msg->db_id, msg->key, msg->ttl, msg->value);
+        moduleFreeContext(&ctx);
+    }
+    return 1;
+}
+
+// Get a batch of completed storage requests from registered external storage modules.
+// @param max: the max number of completed responses we can retrieve.
+// Returns the number of completed requests fetched.
+int moduleGetCompletedExternalStorageResponses(ValkeyModuleExternalStorageMsg **responses, int max) {
+    if (!moduleHasExternalStorageSubscribers()) {
+        return 0;
+    }
+    listIter li;
+    listNode *ln;
+    listRewind(moduleExternalStorageSubscribers, &li);
+    int num_completed_requests = 0;
+    while ((ln = listNext(&li))) {
+        ValkeyModuleExternalStorageSubscriber *sub = ln->value;
+        ValkeyModuleCtx ctx;
+        moduleCreateContext(&ctx, sub->module, VALKEYMODULE_CTX_NONE);
+        for (int i = 0; i < max; i++) {
+            if (num_completed_requests >= max) break;
+            ValkeyModuleExternalStorageMsg *msg = sub->response_callback(&ctx);
+            if (msg != NULL) {
+                responses[num_completed_requests] = msg;
+                num_completed_requests++;
+            } else {
+                break; // No more completed responses for this module
+            }
+        }
+        moduleFreeContext(&ctx);
+    }
+    return num_completed_requests;
+}
+
+int moduleHasExternalStorageSubscribers(void) {
+    return moduleExternalStorageSubscribers != NULL && listLength(moduleExternalStorageSubscribers) > 0;
+}
+
 /* --------------------------------------------------------------------------
  * Helpers for modules API implementation
  * -------------------------------------------------------------------------- */
@@ -14842,6 +14963,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(RdbStreamFree);
     REGISTER_API(RdbLoad);
     REGISTER_API(RdbSave);
+    REGISTER_API(DeserializeDumpPayload);
     REGISTER_API(RegisterScriptingEngine);
     REGISTER_API(UnregisterScriptingEngine);
     REGISTER_API(GetFunctionExecutionState);
@@ -14851,4 +14973,6 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(ScriptingEngineDebuggerFlushLogs);
     REGISTER_API(ScriptingEngineDebuggerProcessCommands);
     REGISTER_API(ACLCheckKeyPrefixPermissions);
+    REGISTER_API(SubscribeToExternalStorage);
+    REGISTER_API(UnsubscribeFromExternalStorage);
 }

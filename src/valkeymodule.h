@@ -550,6 +550,46 @@ typedef void (*ValkeyModuleEventCallback)(struct ValkeyModuleCtx *ctx,
                                           uint64_t subevent,
                                           void *data);
 
+// Data tiering storage module callback methods. Registered from the module during initialization.
+
+#define VALKEYMODULE_EXTERNAL_STORAGE_MSG_TYPE_WRITE 0
+#define VALKEYMODULE_EXTERNAL_STORAGE_MSG_TYPE_READ 1
+
+typedef struct ValkeyModuleExternalStorageMsg {
+    // Holds the type of the message.
+    int msg_type;
+
+    // Indicate the status of the message (e.g. did the operation succeed)
+    int status;
+
+    // TTL of the item in milliseconds
+    long long ttl;
+
+    // Holds the database Id for the corresponding data.
+    int db_id;
+
+    // This is the key.
+    void *key;
+
+    // This is the value.
+    void *value;
+} ValkeyModuleExternalStorageMsg;
+
+// Core invokes this callback to send a request to the external storage module to perform a task
+// such as read/write/delete an item, flush, start snapshot, retrieving key names, etc.
+// Returns VALKEYMODULE_OK if the request is received successfully, VALKEYMODULE_ERR otherwise.
+typedef int (*ValkeyModuleExternalStorageRequestCallback)(struct ValkeyModuleCtx *ctx,
+                                                    int type,
+                                                    int db_id,
+                                                    ValkeyModuleString *key,
+                                                    long long ttl,
+                                                    void *data);
+
+// Core invokes this callback to get the next completed storage response from the external storage module.
+// The response can indicate task completion for read/write/delete, flush, expiry/eviction, getting key names, etc.
+// Returns the storage message containing the relevant information on success, NULL if no more responses.
+typedef ValkeyModuleExternalStorageMsg *(*ValkeyModuleExternalStorageResponseCallback)(struct ValkeyModuleCtx *ctx);
+
 /* IMPORTANT: When adding a new version of one of below structures that contain
  * event data (ValkeyModuleFlushInfoV1 for example) we have to avoid renaming the
  * old ValkeyModuleEvent structure.
@@ -2181,6 +2221,8 @@ VALKEYMODULE_API int (*ValkeyModule_RdbSave)(ValkeyModuleCtx *ctx,
                                              ValkeyModuleRdbStream *stream,
                                              int flags) VALKEYMODULE_ATTR;
 
+VALKEYMODULE_API void *(*ValkeyModule_DeserializeDumpPayload)(ValkeyModuleCtx *ctx, char *val, size_t len) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_RegisterScriptingEngine)(ValkeyModuleCtx *module_ctx,
                                                              const char *engine_name,
                                                              ValkeyModuleScriptingEngineCtx *engine_ctx,
@@ -2207,6 +2249,12 @@ VALKEYMODULE_API int (*ValkeyModule_ACLCheckKeyPrefixPermissions)(ValkeyModuleUs
                                                                   const char *key,
                                                                   size_t len,
                                                                   unsigned int flags) VALKEYMODULE_ATTR;
+
+// Exported data tiering APIs for external storage modules to invoke
+VALKEYMODULE_API int (*ValkeyModule_SubscribeToExternalStorage)(ValkeyModuleCtx *ctx,
+                                                       ValkeyModuleExternalStorageRequestCallback req_callback,
+                                                       ValkeyModuleExternalStorageResponseCallback res_callback) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_UnsubscribeFromExternalStorage)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
 
 #define ValkeyModule_IsAOFClient(id) ((id) == UINT64_MAX)
 /* This is included inline inside each Valkey module. */
@@ -2498,6 +2546,7 @@ static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, in
     VALKEYMODULE_GET_API(BlockedClientMeasureTimeEnd);
     VALKEYMODULE_GET_API(SetDisconnectCallback);
     VALKEYMODULE_GET_API(SubscribeToKeyspaceEvents);
+    VALKEYMODULE_GET_API(SubscribeToExternalStorage);
     VALKEYMODULE_GET_API(AddPostNotificationJob);
     VALKEYMODULE_GET_API(NotifyKeyspaceEvent);
     VALKEYMODULE_GET_API(GetNotifyKeyspaceEvents);
@@ -2581,6 +2630,7 @@ static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, in
     VALKEYMODULE_GET_API(RdbStreamFree);
     VALKEYMODULE_GET_API(RdbLoad);
     VALKEYMODULE_GET_API(RdbSave);
+    VALKEYMODULE_GET_API(DeserializeDumpPayload);
     VALKEYMODULE_GET_API(RegisterScriptingEngine);
     VALKEYMODULE_GET_API(UnregisterScriptingEngine);
     VALKEYMODULE_GET_API(GetFunctionExecutionState);

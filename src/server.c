@@ -2922,6 +2922,7 @@ serverDb *createDatabase(int id) {
     db->ready_keys = dictCreate(&objectKeyPointerValueDictType);
     db->watched_keys = dictCreate(&keylistDictType);
     db->keys_to_ext_storage = hashtableCreate(&setHashtableType);
+    db->keys_not_in_ext_storage = hashtableCreate(&setHashtableType);
     db->id = id;
     resetDbExpiryState(db);
     return db;
@@ -4278,15 +4279,6 @@ void unprepareCommand(client *c) {
  * if C_ERR is returned the client was destroyed (i.e. after QUIT). */
 int processCommand(client *c) {
     serverAssert(!c->flag.blocked && !c->flag.unblocked);
-
-    // For data tiering, we first try to process the completed storage
-    // requests and unblock previous clients. This needs to be done prior
-    // to starting any processing for the current client because we don't
-    // want to further delay the previously blocked clients as they have
-    // strictly higher priority over newly incoming clients.
-    // In addition, we want to spill old items to disk if the memory usage
-    // is above the spill to disk memory threshold.
-    // processCompletedStorageRequestsAndSpillOldItems();
 
     if (!scriptIsTimedout()) {
         /* Both EXEC and scripts call call() directly so there should be

@@ -906,7 +906,8 @@ typedef struct serverDb {
                                            * This is a subset of blocking_keys*/
     dict *ready_keys;                     /* Blocked keys that received a PUSH */
     dict *watched_keys;                   /* WATCHED keys for MULTI/EXEC CAS */
-    hashtable *keys_to_ext_storage;       /* keys in flight to external storage */
+    hashtable *keys_to_ext_storage;       /* keys that are in-flight to external storage */
+    hashtable *keys_not_in_ext_storage;   /* keys that are confirmed to be not in external storage */
     int id;                               /* Database ID */
     struct {
         long long avg_ttl;    /* Average TTL, just for stats */

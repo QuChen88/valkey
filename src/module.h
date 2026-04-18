@@ -24,6 +24,7 @@ struct moduleLoadQueueEntry;
 struct ValkeyModuleKeyOptCtx;
 struct ValkeyModuleCommand;
 struct clusterState;
+struct ValkeyModuleExternalStorageMsg;
 
 /* Each module type implementation should export a set of methods in order
  * to serialize and deserialize the value in the RDB file, rewrite the AOF
@@ -48,6 +49,10 @@ typedef void (*moduleTypeUnlinkFunc2)(struct ValkeyModuleKeyOptCtx *ctx, void *v
 typedef void *(*moduleTypeCopyFunc2)(struct ValkeyModuleKeyOptCtx *ctx, const void *value);
 typedef int (*moduleTypeAuthCallback)(struct ValkeyModuleCtx *ctx, void *username, void *password, const char **err);
 
+// Data tiering module APIs
+int moduleFireExternalStorageEvent(struct ValkeyModuleExternalStorageMsg *msg);
+int moduleHasExternalStorageSubscribers(void);
+int moduleGetCompletedExternalStorageResponses(struct ValkeyModuleExternalStorageMsg **responses, int limit);
 
 /* The module type, which is referenced in each value of a given type, defines
  * the methods and links to the module exporting the type. */
