@@ -6649,6 +6649,13 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
         }
     }
 
+    /* External storage */
+    if (all_sections || (dictFind(section_dict, "external_storage") != NULL)) {
+        if (sections++) info = sdscat(info, "\r\n");
+        info = sdscatprintf(info, "# External Storage\r\n");
+        info = genExternalStorageInfoString(info);
+    }
+
     /* Modules */
     if (all_sections || (dictFind(section_dict, "module_list") != NULL) ||
         (dictFind(section_dict, "modules") != NULL)) {

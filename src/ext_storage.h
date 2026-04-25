@@ -19,12 +19,12 @@ extern int ext_data_enabled;
 extern int max_num_concurrent_items_spilled;
 extern int items_spillover_batch_size;
 
-
 void extStorage_init(void);
 
 int preCommandExec(client *c);
 
 int processCompletedStorageRequestsAndSpillOldItems(void);
+sds genExternalStorageInfoString(sds info);
 
 #endif
 

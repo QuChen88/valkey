@@ -34,6 +34,7 @@
 #include "bio.h"
 #include "script.h"
 #include "cluster_migrateslots.h"
+#include "ext_storage.h"
 #include <math.h>
 
 /* ----------------------------------------------------------------------------
@@ -528,6 +529,9 @@ int performEvictions(void) {
     /* Try to smoke-out bugs (server.also_propagate should be empty here) */
     serverAssert(server.also_propagate.numops == 0);
     /* Evictions are performed on random keys that have nothing to do with the current command slot. */
+
+    // If external storage is enabled, try to tier items to the external storage to free up memory
+    if (processCompletedStorageRequestsAndSpillOldItems() > 0) return EVICT_OK;
 
     while (mem_freed < (long long)mem_tofree) {
         int bestdbid;

@@ -13,11 +13,16 @@ const int COMPLETED_STORAGE_REQUESTS_PROCESSING_BATCH_SIZE = 10;
 
 // Configuration parameters
 int ext_data_enabled = 0;
-int max_num_concurrent_items_spilled = 10;
+int max_num_concurrent_items_spilled = 100;
 int items_spillover_batch_size = 10;
 
+// Metrics
+static long long total_items_spilled_to_ext_storage = 0;
+static long long total_items_fetched_from_ext_storage = 0;
+static long long total_items_spilling_to_ext_storage = 0;
+static long long total_items_fetching_from_ext_storage = 0;
+
 // State variables
-static int num_items_spilling_to_disk = 0;
 static struct evictionPoolEntry *spillPoolLRU = NULL;
 static ValkeyModuleExternalStorageMsg **completed_storage_requests = NULL;
 
@@ -113,6 +118,7 @@ int preCommandExec(client *c) {
                 ValkeyModuleExternalStorageMsg *msg = createStorageMessage(VALKEYMODULE_EXTERNAL_STORAGE_MSG_TYPE_READ,
                                                           current_db->id, c->argv[keys[i].pos], NULL, 0);
                 moduleFireExternalStorageEvent(msg);
+                total_items_fetching_from_ext_storage++;
             } else {
                 serverLog(LL_DEBUG, "Unable to add key to keys_to_ext_storage hashtable: %s", key_str);
             }
@@ -151,11 +157,13 @@ static void processCompletedStorageRequests(void) {
                     if (msg->ttl > 0) {
                         setExpire(NULL, server.db[db_id], key, msg->ttl);
                     }
+                    total_items_fetched_from_ext_storage++;
                 } else {
                     // If the value is NULL for a READ storage response, then the key is not found in the
                     // storage layer. We track the key as absent in the DB
                     hashtableAdd(server.db[db_id]->keys_not_in_ext_storage, sdsdup(key_name));
                 }
+                total_items_fetching_from_ext_storage--;
                 break;
             }
             case VALKEYMODULE_EXTERNAL_STORAGE_MSG_TYPE_WRITE: {
@@ -163,12 +171,12 @@ static void processCompletedStorageRequests(void) {
                 if (msg->status != VALKEYMODULE_OK) {
                     serverLog(LL_WARNING, "Failed to write the key %s to external storage. Keeping the item in memory.", key_name);
                 } else {
-                    if (dbGenericDelete(server.db[db_id], key, 0, DB_FLAG_KEY_NONE) == 0) {
-                        serverLog(LL_DEBUG, "dbGenericDelete() returns 0, failed to delete item...");
-                    } else {
-                        serverLog(LL_DEBUG, "Successfully deleted key %s", key_name);
+                    if (dbGenericDelete(server.db[db_id], key, 0, DB_FLAG_KEY_NONE) > 0) {
+                        total_items_spilled_to_ext_storage++;
+                        serverLog(LL_DEBUG, "Successfully deleted from memory key: %s", key_name);
                     }
                 }
+                total_items_spilling_to_ext_storage--;
                 break;
             }
             default:
@@ -187,36 +195,43 @@ static bool isEmbeddedObject(dbEntry *o) {
     return (o->encoding == OBJ_ENCODING_EMBSTR || o->encoding == OBJ_ENCODING_INT);
 }
 
-// Returns -1 if the key can't be spilled, return 0 if the key is spilled.
+/**
+ * Asynchronously spill a key to external storage.
+ * Returns 0 if the key is being spilled, returns -1 otherwise.
+ */
 static int spillItemAsync(sds key, int db_id) {
     serverAssert(key != NULL && db_id >= 0 && server.db[db_id]);
     dbEntry *item = dbFind(server.db[db_id], key);
     // We cannot spill an item that is embedded object.
     if (isEmbeddedObject(item)) {
-        serverLog(LL_DEBUG, "Key is embedded. Can't spill...");
+        serverLog(LL_DEBUG, "Can't spill an embedded key.");
         return -1;
     }
     // We cannot spill an item whose ref count is greater than 1
     if (item->refcount != 1) {
-        serverLog(LL_DEBUG, "Item %s refcount is %d, can't spill...", key, (int)item->refcount);
+        serverLog(LL_DEBUG, "Can't spill key %s with refcount is %d", key, (int)item->refcount);
         return -1;
     }
 
     // TODO: prevent rehashing while the entry before spilling the item to external storage.
 
-    // Notify the storage layer to spill the item
-    if (hashtableAdd(server.db[db_id]->keys_to_ext_storage, sdsdup(key))) {
+    // If the key is not already in transit to storage layer, then notify the storage layer to spill it
+    if (moduleHasExternalStorageSubscribers() && hashtableAdd(server.db[db_id]->keys_to_ext_storage, sdsdup(key))) {
         robj *keyobj = createStringObject(key, sdslen(key));
         long long expireMs = objectGetExpire(item);
         serverLog(LL_DEBUG, "Moving key %s in DB %d to external storage with TTL %lld", key, db_id, expireMs);
-        if (moduleHasExternalStorageSubscribers()) {
-            ValkeyModuleExternalStorageMsg *msg = createStorageMessage(VALKEYMODULE_EXTERNAL_STORAGE_MSG_TYPE_WRITE, db_id, keyobj, item, expireMs);
-            moduleFireExternalStorageEvent(msg);
-        }
+        ValkeyModuleExternalStorageMsg *msg = createStorageMessage(VALKEYMODULE_EXTERNAL_STORAGE_MSG_TYPE_WRITE, db_id, keyobj, item, expireMs);
+        moduleFireExternalStorageEvent(msg);
+        return 0;
     }
-    return 0;
+    return -1;
 }
 
+/**
+ * Process a batch of completed storage requests and spill a batch of old items if we are over maxmemory.
+ * Returns the total number of keys being spilled to external storage.
+ * Returns 0 if this function did a no-op and no keys are being spilled.
+ */
 int processCompletedStorageRequestsAndSpillOldItems(void) {
     if (!ext_data_enabled) return 0;
     if (server.maxmemory == 0) return 0; // Unlimited maxmemory
@@ -228,36 +243,59 @@ int processCompletedStorageRequestsAndSpillOldItems(void) {
         return 0;
     }
 
+    int num_items_spilling = 0;
     if (getMaxmemoryState(NULL, NULL, NULL, NULL) == C_ERR) {
-        // Spill a batch of oldest item using async storage IO
-        num_items_spilling_to_disk = 0;
-        for (int i = 0; i < items_spillover_batch_size; i++) {
-            // If the number of items in flight to disk is beyond the limit, exit
-            if (num_items_spilling_to_disk >= max_num_concurrent_items_spilled) {
-                return 0;
-            }
+        // Asynchronously spill a batch of oldest item to the storage layer
+        while (num_items_spilling < items_spillover_batch_size) {
+            // If too many items are in flight to external storage, stop spilling more items
+            if (total_items_spilling_to_ext_storage >= max_num_concurrent_items_spilled) break;
+
             // Find a batch of oldest items
             int best_dbid;
             int best_slot;
             sds best_key = findBestEvictionCandidate(spillPoolLRU, &best_dbid, &best_slot);
             if (best_key == NULL) {
-                serverLog(LL_DEBUG, "Did not find the best key for spilling...");
                 // No evictable key found across all DBs
-                return 0;
+                serverLog(LL_DEBUG, "Did not find the best key for spilling...");
+                break;
             }
+
+            // If the key is already in transit to external storage, then skip it
+            if (hashtableFind(server.db[best_dbid]->keys_to_ext_storage, best_key, NULL)) {
+                serverLog(LL_DEBUG, "key %s already in transit", best_key);
+                break;
+            }
+
             if (spillItemAsync(best_key, best_dbid) == -1) {
-                // If the ASIO layer is unable to take the request to spill item to disk,
+                // If the storage layer is unable to take the request to spill item to disk,
                 // clean up the asio_entry object and return. We will retry next time.
                 serverLog(LL_DEBUG, "Unable to spill key %s to disk...", best_key);
-                return 0;
+                break;
             } else {
                 // We successfully spilled the item
-                num_items_spilling_to_disk++;
-                serverLog(LL_DEBUG, "successfully spilled key from DB: %d, slot: %d...", best_dbid, best_slot);
+                num_items_spilling++;
+                total_items_spilling_to_ext_storage++;
             }
         }
     }
-    return 0;
+    return total_items_spilling_to_ext_storage;
 }
 
-
+/**
+ * Adds external storage information to info's output.
+ *
+ * After the call, the passed sds info string is no longer valid and all the
+ * references must be substituted with the new pointer returned by the call.
+ */
+sds genExternalStorageInfoString(sds info) {
+    info = sdscatprintf(info,
+                     "total_num_items_spilled_to_ext_storage:%lld\r\n"
+                     "total_num_items_fetched_from_ext_storage:%lld\r\n"
+                     "num_items_spilling_to_ext_storage:%lld\r\n"
+                     "num_items_fetching_from_ext_storage:%lld\r\n",
+                     total_items_spilled_to_ext_storage,
+                     total_items_fetched_from_ext_storage,
+                     total_items_spilling_to_ext_storage,
+                     total_items_fetching_from_ext_storage);
+    return info;
+}

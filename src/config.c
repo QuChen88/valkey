@@ -3419,7 +3419,7 @@ standardConfig static_configs[] = {
     createIntConfig("rdma-rx-size", NULL, IMMUTABLE_CONFIG, 64 * 1024, 16 * 1024 * 1024, server.rdma_ctx_config.rx_size, 1024 * 1024, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rdma-completion-vector", NULL, IMMUTABLE_CONFIG, -1, 1024, server.rdma_ctx_config.completion_vector, -1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-message-gossip-perc", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 1, 100, server.cluster_message_gossip_perc, 10, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("ext-storage-max-concurrent-items-spilled", NULL, MODIFIABLE_CONFIG, 1, 100, max_num_concurrent_items_spilled, 10, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("ext-storage-max-concurrent-items-spilled", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, max_num_concurrent_items_spilled, 100, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("ext-storage-items-spillover-batch-size", NULL, MODIFIABLE_CONFIG, 1, 100, items_spillover_batch_size, 10, INTEGER_CONFIG, NULL, NULL),
 
 
